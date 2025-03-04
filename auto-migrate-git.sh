@@ -14,7 +14,7 @@ git pull origin main --rebase
 git add .
 
 # Commit changes with a timestamp
-git commit -m "Auto-commit: $(date +"%Y-%m-%d %H:%M:%S")"
+git commit -m "$(date +"%Y-%m-%d %H:%M:%S")"
 
 # Push the changes to the remote repository
 git push -u origin main
