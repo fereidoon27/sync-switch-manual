@@ -2,7 +2,8 @@
 
 # Get script directory for finding config file
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-CONFIG_FILE="$SCRIPT_DIR/ST_INFO.txt"
+INFO_PATH="$(dirname "$0")/Info"
+SERVERS_CONF="$INFO_PATH/servers.conf"
 
 # Log file setup
 LOG_FILE="$HOME/sync_$(date +%Y%m%d).log"
@@ -12,57 +13,130 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-# Function to read config value with default
-read_config() {
-    local key="$1"
-    local default="$2"
-    local value=""
-    
-    if [ -f "$CONFIG_FILE" ]; then
-        value=$(grep "^$key=" "$CONFIG_FILE" | cut -d= -f2)
-    fi
-    
-    echo "${value:-$default}"
+# Check if servers.conf exists
+if [ ! -f "$SERVERS_CONF" ]; then
+    log "ERROR: Configuration file $SERVERS_CONF not found"
+    exit 1
+fi
+
+# Function to get unique datacenters from servers.conf
+get_datacenters() {
+    awk -F'|' '{print $1}' "$SERVERS_CONF" | sort -u
 }
 
-# Load default values from config file
-DEFAULT_SOURCE_USER=$(read_config "SOURCE_USER" "root")
-DEFAULT_SOURCE_IP=$(read_config "SOURCE_IP" "127.0.0.1")
-DEFAULT_SOURCE_PORT=$(read_config "SOURCE_PORT" "22")
-DEFAULT_DEST_USER=$(read_config "DEST_USER" "root")
-DEFAULT_DEST_IP=$(read_config "DEST_IP" "127.0.0.1")
-DEFAULT_DEST_PORT=$(read_config "DEST_PORT" "22")
-DEFAULT_DEST_PATH=$(read_config "DEST_PATH" "/tmp")
+# Function to get VMs for a specific datacenter
+get_vms_for_datacenter() {
+    local datacenter="$1"
+    awk -F'|' -v dc="$datacenter" '$1 == dc {print $2}' "$SERVERS_CONF"
+}
 
-# Get input parameters with defaults
-read -p "Enter source VM username [$DEFAULT_SOURCE_USER]: " SOURCE_USER
-SOURCE_USER=${SOURCE_USER:-$DEFAULT_SOURCE_USER}
+# Function to get server info from servers.conf
+get_server_info() {
+    local datacenter="$1"
+    local vm_name="$2"
+    local field="$3"
+    
+    # Field mapping: 1=datacenter, 2=vm_name, 3=ip, 4=host, 5=username, 6=port
+    local field_num
+    case "$field" in
+        "ip") field_num=3 ;;
+        "host") field_num=4 ;;
+        "username") field_num=5 ;;
+        "port") field_num=6 ;;
+        *) field_num=0 ;;
+    esac
+    
+    if [ "$field_num" -eq 0 ]; then
+        echo "unknown"
+        return
+    fi
+    
+    awk -F'|' -v dc="$datacenter" -v vm="$vm_name" -v fn="$field_num" \
+        '$1 == dc && $2 == vm {print $fn}' "$SERVERS_CONF"
+}
 
-read -p "Enter source VM IP [$DEFAULT_SOURCE_IP]: " SOURCE_IP
-SOURCE_IP=${SOURCE_IP:-$DEFAULT_SOURCE_IP}
+# Get unique datacenters
+DATACENTERS=($(get_datacenters))
 
-read -p "Enter source VM SSH port [$DEFAULT_SOURCE_PORT]: " SOURCE_PORT
-SOURCE_PORT=${SOURCE_PORT:-$DEFAULT_SOURCE_PORT}
+# Display datacenter options for source
+echo "Available datacenters:"
+for i in "${!DATACENTERS[@]}"; do
+    echo "$((i+1)). ${DATACENTERS[$i]}"
+done
 
-read -p "Enter destination VM username [$DEFAULT_DEST_USER]: " DEST_USER
-DEST_USER=${DEST_USER:-$DEFAULT_DEST_USER}
+# Get source datacenter
+while true; do
+    read -p "Choose source datacenter (1-${#DATACENTERS[@]}): " SRC_DC_CHOICE
+    if [[ "$SRC_DC_CHOICE" =~ ^[0-9]+$ ]] && [ "$SRC_DC_CHOICE" -ge 1 ] && [ "$SRC_DC_CHOICE" -le "${#DATACENTERS[@]}" ]; then
+        SOURCE_DATACENTER="${DATACENTERS[$((SRC_DC_CHOICE-1))]}"
+        break
+    fi
+    echo "Invalid selection. Please try again."
+done
 
-read -p "Enter destination VM IP [$DEFAULT_DEST_IP]: " DEST_IP
-DEST_IP=${DEST_IP:-$DEFAULT_DEST_IP}
+# Get destination datacenter
+while true; do
+    read -p "Choose destination datacenter (1-${#DATACENTERS[@]}): " DST_DC_CHOICE
+    if [[ "$DST_DC_CHOICE" =~ ^[0-9]+$ ]] && [ "$DST_DC_CHOICE" -ge 1 ] && [ "$DST_DC_CHOICE" -le "${#DATACENTERS[@]}" ]; then
+        DEST_DATACENTER="${DATACENTERS[$((DST_DC_CHOICE-1))]}"
+        break
+    fi
+    echo "Invalid selection. Please try again."
+done
 
-read -p "Enter destination VM SSH port [$DEFAULT_DEST_PORT]: " DEST_PORT
-DEST_PORT=${DEST_PORT:-$DEFAULT_DEST_PORT}
+# Get VMs for source datacenter
+SOURCE_VMS=($(get_vms_for_datacenter "$SOURCE_DATACENTER"))
 
-read -p "Enter destination folder path [$DEFAULT_DEST_PATH]: " DEST_PATH
-DEST_PATH=${DEST_PATH:-$DEFAULT_DEST_PATH}
+# Display VM options for source
+echo "Available VMs in $SOURCE_DATACENTER datacenter:"
+for i in "${!SOURCE_VMS[@]}"; do
+    echo "$((i+1)). ${SOURCE_VMS[$i]}"
+done
+
+# Get source VM
+while true; do
+    read -p "Choose source VM (1-${#SOURCE_VMS[@]}): " SRC_VM_CHOICE
+    if [[ "$SRC_VM_CHOICE" =~ ^[0-9]+$ ]] && [ "$SRC_VM_CHOICE" -ge 1 ] && [ "$SRC_VM_CHOICE" -le "${#SOURCE_VMS[@]}" ]; then
+        SOURCE_VM="${SOURCE_VMS[$((SRC_VM_CHOICE-1))]}"
+        break
+    fi
+    echo "Invalid selection. Please try again."
+done
+
+# Extract VM number and determine matching destination VM
+VM_NUMBER=$(echo "$SOURCE_VM" | sed 's/^[a-zA-Z]*\([0-9]\+\)[a-zA-Z]*$/\1/')
+DEST_VM_PREFIX=$(echo "${SOURCE_VMS[0]}" | sed 's/^\([a-zA-Z]*\)[0-9]\+[a-zA-Z]*$/\1/')
+DEST_VM="${DEST_VM_PREFIX}${VM_NUMBER}${DEST_DATACENTER}"
+
+# Set connection parameters
+SOURCE_USER=$(get_server_info "$SOURCE_DATACENTER" "$SOURCE_VM" "username")
+SOURCE_HOST=$(get_server_info "$SOURCE_DATACENTER" "$SOURCE_VM" "host")
+SOURCE_IP=$(get_server_info "$SOURCE_DATACENTER" "$SOURCE_VM" "ip")
+SOURCE_PORT=$(get_server_info "$SOURCE_DATACENTER" "$SOURCE_VM" "port")
+SOURCE_PATH="/home/$SOURCE_USER/"
+
+DEST_USER=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "username")
+DEST_HOST=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "host")
+DEST_IP=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "ip")
+DEST_PORT=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "port")
+DEST_PATH="/home/$DEST_USER/"
+
+# Display summary and confirm
+echo -e "\nConfiguration Summary:"
+echo "Source: $SOURCE_DATACENTER - Server: $SOURCE_VM ($SOURCE_HOST)"
+echo "Destination: $DEST_DATACENTER - Server: $DEST_VM ($DEST_HOST)"
+read -p "Continue? (y/n): " CONFIRM
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+    log "Operation canceled by user"
+    exit 0
+fi
 
 # Display options for transfer
-echo "Transfer options:"
-echo "1. Transfer a specific file from source VM to destination VM"
-echo "2. Transfer a specific folder from source VM to destination VM"
-echo "3. Transfer specific files/folders from home directory based on patterns"
+echo -e "\nTransfer options:"
+echo "1. Transfer a specific file or folder from source VM to destination VM"
+echo "2. Transfer specific files/folders from home directory based on patterns"
 echo "   (van-buren-* directories, .sh files, .secret/ folder)"
-read -p "Choose an option (1-3) [1]: " TRANSFER_OPTION
+read -p "Choose an option (1-2) [1]: " TRANSFER_OPTION
 TRANSFER_OPTION=${TRANSFER_OPTION:-1}
 
 # Build SSH connection strings
@@ -104,17 +178,12 @@ log "Source home directory: $SOURCE_HOME"
 # Based on option, get additional input
 case $TRANSFER_OPTION in
     1)
-        read -p "Enter the path to the specific file on source VM: " SOURCE_PATH
+        read -p "Enter the path to the specific file or folder on source VM: " SOURCE_PATH
         # Replace tilde with actual home directory if present
         SOURCE_PATH=${SOURCE_PATH/#\~/$SOURCE_HOME}
         ;;
     2)
-        read -p "Enter the path to the specific folder on source VM: " SOURCE_PATH
-        # Replace tilde with actual home directory if present
-        SOURCE_PATH=${SOURCE_PATH/#\~/$SOURCE_HOME}
-        ;;
-    3)
-        # Option 3 uses predefined patterns from home directory
+        # Option 2 uses predefined patterns from home directory
         SOURCE_PATH="$SOURCE_HOME"
         ;;
     *)
@@ -132,18 +201,27 @@ log "Direct access: $DIRECT_ACCESS"
 RSYNC_OPTS="-az --progress"
 
 if [ "$TRANSFER_OPTION" -eq 1 ]; then
-    # For single file, don't add trailing slash to SOURCE_PATH
-    FILE_NAME=$(basename "$SOURCE_PATH")
-    DEST_FULL="$DEST_PATH/$FILE_NAME"
-    log "Transferring specific file: $SOURCE_PATH to $DEST_FULL"
+    # Check if source path is a file or directory
+    IS_DIRECTORY=$($SOURCE_SSH "[ -d \"$SOURCE_PATH\" ] && echo 'yes' || echo 'no'")
+    
+    if [ "$IS_DIRECTORY" = "yes" ]; then
+        # For directory, preserve the directory structure
+        # Get the directory name
+        DIR_NAME=$(basename "$SOURCE_PATH")
+        # Make sure source path doesn't have a trailing slash to preserve the directory name
+        SOURCE_PATH="${SOURCE_PATH%/}"
+        # Set destination to parent directory
+        DEST_FULL="$DEST_PATH"
+        log "Transferring folder: $SOURCE_PATH to $DEST_FULL/$DIR_NAME"
+    else
+        # For single file
+        FILE_NAME=$(basename "$SOURCE_PATH")
+        DEST_FULL="$DEST_PATH"
+        log "Transferring file: $SOURCE_PATH to $DEST_FULL/$FILE_NAME"
+    fi
 elif [ "$TRANSFER_OPTION" -eq 2 ]; then
-    # For directory, add trailing slash to SOURCE_PATH to copy contents
-    SOURCE_PATH="${SOURCE_PATH%/}/"
-    DEST_FULL="$DEST_PATH"
-    log "Transferring specific folder: $SOURCE_PATH to $DEST_FULL"
-elif [ "$TRANSFER_OPTION" -eq 3 ]; then
     # For pattern matching, create a temporary file with the patterns
-    PATTERN_FILE="/tmp/rsync_patterns_$$"
+    PATTERN_FILE="/tmp/rsync_patterns_$"
     cat > "$PATTERN_FILE" << EOF
 + van-buren-*/
 + van-buren-*/**
@@ -174,9 +252,9 @@ if [ "$DIRECT_ACCESS" = "yes" ]; then
     log "Direct access available. Performing direct sync..."
     
     # Create the rsync command
-    if [ "$TRANSFER_OPTION" -eq 3 ]; then
+    if [ "$TRANSFER_OPTION" -eq 2 ]; then
         # For pattern matching, copy the pattern file to source VM
-        REMOTE_PATTERN_FILE="/tmp/rsync_patterns_$$.remote"
+        REMOTE_PATTERN_FILE="/tmp/rsync_patterns_$.remote"
         scp -P "$SOURCE_PORT" "$PATTERN_FILE" "$SOURCE_USER@$SOURCE_IP:$REMOTE_PATTERN_FILE" || handle_failure "copying pattern file to source VM"
         
         # Execute the rsync command with the pattern file
@@ -186,7 +264,7 @@ if [ "$DIRECT_ACCESS" = "yes" ]; then
         # Cleanup remote pattern file
         $SOURCE_SSH "rm -f $REMOTE_PATTERN_FILE"
     else
-        # For single file or directory
+        # For file or directory transfer
         log "Starting direct transfer..."
         $SOURCE_SSH "rsync $RSYNC_OPTS -e 'ssh -p $DEST_PORT' $SOURCE_PATH $DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "direct transfer"
     fi
@@ -205,14 +283,10 @@ else
     log "Step 1: Copying from source to main VM..."
     
     if [ "$TRANSFER_OPTION" -eq 1 ]; then
-        # For single file
-        log "Transferring file from source to main VM..."
+        # For file or directory
+        log "Transferring file/directory from source to main VM..."
         rsync $RSYNC_OPTS -e "ssh -p $SOURCE_PORT" "$SOURCE_USER@$SOURCE_IP:$SOURCE_PATH" "$TEMP_DIR/" || handle_failure "copy from source to main VM"
     elif [ "$TRANSFER_OPTION" -eq 2 ]; then
-        # For directory
-        log "Transferring directory from source to main VM..."
-        rsync $RSYNC_OPTS -e "ssh -p $SOURCE_PORT" "$SOURCE_USER@$SOURCE_IP:$SOURCE_PATH" "$TEMP_DIR/" || handle_failure "copy from source to main VM"
-    elif [ "$TRANSFER_OPTION" -eq 3 ]; then
         # For pattern matching
         log "Transferring pattern-matched files from source to main VM..."
         rsync $RSYNC_OPTS --include-from="$PATTERN_FILE" -e "ssh -p $SOURCE_PORT" "$SOURCE_USER@$SOURCE_IP:$SOURCE_PATH" "$TEMP_DIR/" || handle_failure "copy from source to main VM"
@@ -221,7 +295,7 @@ else
     # Step 2: Main to Destination
     log "Step 2: Copying from main VM to destination..."
     
-    if [ "$TRANSFER_OPTION" -eq 1 ]; then
+    if [ "$TRANSFER_OPTION" -eq 1 ] && [ "$IS_DIRECTORY" = "no" ]; then
         # For single file, get filename
         FILE_NAME=$(basename "$SOURCE_PATH")
         log "Transferring $FILE_NAME from main VM to destination..."
