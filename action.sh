@@ -21,13 +21,15 @@ log() {
     
     # Pad action name to ensure consistent column width (25 characters)
     local padded_action_name=$(printf "%-25s" "$action_name")
+    # Pad server name to ensure consistent column width (15 characters)
+    local padded_server=$(printf "%-15s" "$server")
     
     if [[ "$status" == "Started" ]]; then
-        echo "[$timestamp] ──▶ [Action $action] $padded_action_name | Server: %-15s | STATUS: $status" "$server" | tee -a "$ACTION_LOG"
+        echo "[$timestamp] ──▶ [Action $action] $padded_action_name | Server: $padded_server | STATUS: $status" | tee -a "$ACTION_LOG"
     elif [[ "$status" == "Completed" ]]; then
-        echo "[$timestamp] ✅  [Action $action] $padded_action_name | Server: %-15s | STATUS: $status" "$server" | tee -a "$ACTION_LOG"
+        echo "[$timestamp] ✅  [Action $action] $padded_action_name | Server: $padded_server | STATUS: $status" | tee -a "$ACTION_LOG"
     elif [[ "$status" == "Failed" ]]; then
-        echo "[$timestamp] ❌  [Action $action] $padded_action_name | Server: %-15s | STATUS: $status" "$server" | tee -a "$ACTION_LOG"
+        echo "[$timestamp] ❌  [Action $action] $padded_action_name | Server: $padded_server | STATUS: $status" | tee -a "$ACTION_LOG"
     else
         echo "[$timestamp] $1" | tee -a "$ACTION_LOG"
     fi
