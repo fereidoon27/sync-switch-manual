@@ -202,22 +202,40 @@ RSYNC_OPTS="-az --progress"
 
 if [ "$TRANSFER_OPTION" -eq 1 ]; then
     # Check if source path is a file or directory
-    IS_DIRECTORY=$($SOURCE_SSH "[ -d \"$SOURCE_PATH\" ] && echo 'yes' || echo 'no'")
+    IS_DIR=$($SOURCE_SSH "[ -d \"$SOURCE_PATH\" ] && echo yes || echo no")
     
-    if [ "$IS_DIRECTORY" = "yes" ]; then
-        # For directory, preserve the directory structure
-        # Get the directory name
-        DIR_NAME=$(basename "$SOURCE_PATH")
-        # Make sure source path doesn't have a trailing slash to preserve the directory name
+    if [ "$IS_DIR" = "yes" ]; then
+        # For directory, preserve the structure
+        # Remove any trailing slash from SOURCE_PATH
         SOURCE_PATH="${SOURCE_PATH%/}"
-        # Set destination to parent directory
-        DEST_FULL="$DEST_PATH"
-        log "Transferring folder: $SOURCE_PATH to $DEST_FULL/$DIR_NAME"
+        
+        if [[ "$SOURCE_PATH" == "$SOURCE_HOME"* ]]; then
+            # If the source folder is under the home directory, use the parent folder relative to home
+            PARENT_PATH=$(dirname "$SOURCE_PATH")
+            RELATIVE_PATH=$(echo "$PARENT_PATH" | sed -e "s|^$SOURCE_HOME/||")
+            DEST_FULL="$DEST_PATH/$RELATIVE_PATH"
+        else
+            # For system directories (like /etc/chrony), use its actual parent directory
+            DEST_FULL="$(dirname "$SOURCE_PATH")"
+        fi
+        
+        log "Transferring specific folder: $SOURCE_PATH to destination directory: $DEST_FULL"
     else
-        # For single file
+        # For single file, don't add trailing slash to SOURCE_PATH
         FILE_NAME=$(basename "$SOURCE_PATH")
-        DEST_FULL="$DEST_PATH"
-        log "Transferring file: $SOURCE_PATH to $DEST_FULL/$FILE_NAME"
+        RELATIVE_PATH=$(dirname $(echo "$SOURCE_PATH" | sed -e "s|^$SOURCE_HOME/||"))
+        
+        if [[ "$RELATIVE_PATH" == "." || "$SOURCE_PATH" == /* ]]; then
+            # Handle absolute paths or files in home directory
+            DEST_FULL="$DEST_PATH/$FILE_NAME"
+        else
+            # Create subdirectory structure for files in subdirectories
+            DEST_FULL="$DEST_PATH/$RELATIVE_PATH"
+            # Create the directory structure on destination
+            $DEST_SSH "mkdir -p \"$DEST_FULL\""
+            DEST_FULL="$DEST_FULL/$FILE_NAME"
+        fi
+        log "Transferring specific file: $SOURCE_PATH to $DEST_FULL"
     fi
 elif [ "$TRANSFER_OPTION" -eq 2 ]; then
     # For pattern matching, create a temporary file with the patterns
@@ -264,7 +282,7 @@ if [ "$DIRECT_ACCESS" = "yes" ]; then
         # Cleanup remote pattern file
         $SOURCE_SSH "rm -f $REMOTE_PATTERN_FILE"
     else
-        # For file or directory transfer
+        # For file or directory
         log "Starting direct transfer..."
         $SOURCE_SSH "rsync $RSYNC_OPTS -e 'ssh -p $DEST_PORT' $SOURCE_PATH $DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "direct transfer"
     fi
@@ -283,9 +301,28 @@ else
     log "Step 1: Copying from source to main VM..."
     
     if [ "$TRANSFER_OPTION" -eq 1 ]; then
-        # For file or directory
-        log "Transferring file/directory from source to main VM..."
-        rsync $RSYNC_OPTS -e "ssh -p $SOURCE_PORT" "$SOURCE_USER@$SOURCE_IP:$SOURCE_PATH" "$TEMP_DIR/" || handle_failure "copy from source to main VM"
+        if [ "$IS_DIR" = "yes" ]; then
+            # For directory, preserve directory structure
+            TARGET_DIR=$(basename "$SOURCE_PATH")
+            
+            # Create local directory structure
+            mkdir -p "$TEMP_DIR"
+            
+            log "Transferring directory from source to main VM preserving structure..."
+            rsync $RSYNC_OPTS -r -e "ssh -p $SOURCE_PORT" "$SOURCE_USER@$SOURCE_IP:$SOURCE_PATH" "$TEMP_DIR/" || handle_failure "copy from source to main VM"
+        else
+            # For single file
+            log "Transferring file from source to main VM..."
+            
+            # Create local directory structure if needed
+            RELATIVE_PATH=$(dirname $(echo "$SOURCE_PATH" | sed -e "s|^$SOURCE_HOME/||"))
+            if [[ "$RELATIVE_PATH" != "." && "$SOURCE_PATH" != /* ]]; then
+                mkdir -p "$TEMP_DIR/$RELATIVE_PATH"
+                rsync $RSYNC_OPTS -e "ssh -p $SOURCE_PORT" "$SOURCE_USER@$SOURCE_IP:$SOURCE_PATH" "$TEMP_DIR/$RELATIVE_PATH/" || handle_failure "copy from source to main VM"
+            else
+                rsync $RSYNC_OPTS -e "ssh -p $SOURCE_PORT" "$SOURCE_USER@$SOURCE_IP:$SOURCE_PATH" "$TEMP_DIR/" || handle_failure "copy from source to main VM"
+            fi
+        fi
     elif [ "$TRANSFER_OPTION" -eq 2 ]; then
         # For pattern matching
         log "Transferring pattern-matched files from source to main VM..."
@@ -295,14 +332,37 @@ else
     # Step 2: Main to Destination
     log "Step 2: Copying from main VM to destination..."
     
-    if [ "$TRANSFER_OPTION" -eq 1 ] && [ "$IS_DIRECTORY" = "no" ]; then
-        # For single file, get filename
-        FILE_NAME=$(basename "$SOURCE_PATH")
-        log "Transferring $FILE_NAME from main VM to destination..."
-        rsync $RSYNC_OPTS -e "ssh -p $DEST_PORT" "$TEMP_DIR/$FILE_NAME" "$DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "copy from main VM to destination"
+    # Make sure target directory exists on destination
+    $DEST_SSH "mkdir -p \"$DEST_PATH\""
+    
+    if [ "$TRANSFER_OPTION" -eq 1 ]; then
+        if [ "$IS_DIR" = "yes" ]; then
+            TARGET_DIR=$(basename "$SOURCE_PATH")
+            log "Transferring directory $TARGET_DIR from main VM to destination..."
+            
+            # Create directory on destination
+            $DEST_SSH "mkdir -p \"$DEST_FULL\""
+            
+            # Transfer with proper path
+            rsync $RSYNC_OPTS -r -e "ssh -p $DEST_PORT" "$TEMP_DIR/$TARGET_DIR/" "$DEST_USER@$DEST_IP:$DEST_FULL/" || handle_failure "copy from main VM to destination"
+        else
+            FILE_NAME=$(basename "$SOURCE_PATH")
+            DEST_DIR=$(dirname "$DEST_FULL")
+            
+            log "Transferring file $FILE_NAME from main VM to destination..."
+            
+            # Create directory structure on destination
+            $DEST_SSH "mkdir -p \"$DEST_DIR\""
+            
+            RELATIVE_PATH=$(dirname $(echo "$SOURCE_PATH" | sed -e "s|^$SOURCE_HOME/||"))
+            if [[ "$RELATIVE_PATH" != "." && "$SOURCE_PATH" != /* ]]; then
+                rsync $RSYNC_OPTS -e "ssh -p $DEST_PORT" "$TEMP_DIR/$RELATIVE_PATH/$FILE_NAME" "$DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "copy from main VM to destination"
+            else
+                rsync $RSYNC_OPTS -e "ssh -p $DEST_PORT" "$TEMP_DIR/$FILE_NAME" "$DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "copy from main VM to destination"
+            fi
+        fi
     else
-        # For directory or patterns
-        log "Transferring all files from main VM to destination..."
+        log "Transferring pattern-matched files from main VM to destination..."
         rsync $RSYNC_OPTS -e "ssh -p $DEST_PORT" "$TEMP_DIR/" "$DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "copy from main VM to destination"
     fi
     
