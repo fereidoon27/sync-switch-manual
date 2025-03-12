@@ -164,7 +164,7 @@ for SOURCE_VM in "${SELECTED_VMS[@]}"; do
 
     # Extract VM number for destination directory
     VM_NUMBER=$(echo "$SOURCE_VM" | sed -E 's/^cr([0-9]+).*/\1/')
-    DEST_PATH="/home/ubuntu/1111-binance-services/cr$VM_NUMBER"
+    DEST_PATH="$HOME/1111-binance-services/cr$VM_NUMBER"
 
     log "Current VM: $SOURCE_VM ($SOURCE_HOST)"
     log "Destination Directory: $DEST_PATH"

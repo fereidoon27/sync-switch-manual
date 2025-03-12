@@ -1,5 +1,71 @@
 #!/bin/bash
 
+# Display help message
+show_help() {
+    echo "Usage: $0 [OPTIONS]"
+    echo
+    echo "Options:"
+    echo "  -s, --services SERVICES    Comma-separated list of services (binance,kucoin,gateio)"
+    echo "  -d, --datacenter DC        Name of datacenter"
+    echo "  -v, --vms VMS              Comma-separated list of VMs"
+    echo "  -p, --parallel NUM         Maximum number of parallel jobs (default: 3)"
+    echo "  -a, --actions ACTIONS      Comma-separated list of actions (1,2,3,4)"
+    echo "  -y, --yes                  Skip confirmation (assume yes)"
+    echo "  -h, --help                 Show this help message"
+    echo
+    echo "Example:"
+    echo "  $0 -s binance,kucoin -d arvan -v cr1arvan,cr2arvan -p 2 -a 1,2,3 -y"
+    echo
+    exit 0
+}
+
+# Parse command line arguments
+parse_args() {
+    # Default values
+    CLI_SERVICES=""
+    CLI_DATACENTER=""
+    CLI_VMS=""
+    CLI_PARALLEL=""
+    CLI_ACTIONS=""
+    CLI_SKIP_CONFIRM=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -s|--services)
+                CLI_SERVICES="$2"
+                shift 2
+                ;;
+            -d|--datacenter)
+                CLI_DATACENTER="$2"
+                shift 2
+                ;;
+            -v|--vms)
+                CLI_VMS="$2"
+                shift 2
+                ;;
+            -p|--parallel)
+                CLI_PARALLEL="$2"
+                shift 2
+                ;;
+            -a|--actions)
+                CLI_ACTIONS="$2"
+                shift 2
+                ;;
+            -y|--yes)
+                CLI_SKIP_CONFIRM=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                ;;
+            *)
+                echo "Unknown option: $1"
+                show_help
+                ;;
+        esac
+    done
+}
+
 # Log file setup
 ACTION_LOG="$HOME/service_actions_$(date +%Y%m%d).log"
 
@@ -34,6 +100,9 @@ print_heading() {
     echo -e "${BLUE}╚═════════════════════════════════════════════════════════╝${NC}"
 }
 
+# Create temporary directory for job logs
+TMP_LOG_DIR=$(mktemp -d)
+
 # Initialize log file with headers
 initialize_log() {
     # Check if the log file already exists
@@ -57,13 +126,15 @@ initialize_log() {
 start_job_section() {
     local job_num=$1
     local vm_name=$2
+    local job_log_file="$TMP_LOG_DIR/job_${job_num}.log"
     
-    echo "" >> "$ACTION_LOG"
-    echo "------------------------------------------------------------" >> "$ACTION_LOG"
-    echo "|            Service Transfer Operation - Job $job_num            |" >> "$ACTION_LOG"
-    echo "|                   Server: $vm_name                      |" >> "$ACTION_LOG"
-    echo "------------------------------------------------------------" >> "$ACTION_LOG"
-    echo "" >> "$ACTION_LOG"
+    # Create job log file with header
+    echo "" > "$job_log_file"
+    echo "------------------------------------------------------------" >> "$job_log_file"
+    echo "|            Service Transfer Operation - Job $job_num            |" >> "$job_log_file"
+    echo "|                   Server: $vm_name                      |" >> "$job_log_file"
+    echo "------------------------------------------------------------" >> "$job_log_file"
+    echo "" >> "$job_log_file"
     
     # Also print to console
     echo ""
@@ -74,8 +145,15 @@ start_job_section() {
     echo ""
 }
 
-# End job sections when all jobs are complete
-end_jobs_section() {
+# Combine all job logs and write to main log file
+combine_logs() {
+    # First, find all job log files and sort them by job number
+    for job_log in $(ls "$TMP_LOG_DIR"/job_*.log | sort -V); do
+        # Append each job log to the main log file
+        cat "$job_log" >> "$ACTION_LOG"
+    done
+    
+    # Add completion footer
     echo "" >> "$ACTION_LOG"
     echo "------------------------------------------------------------" >> "$ACTION_LOG"
     echo "|        All Service Transfer Operations Completed         |" >> "$ACTION_LOG"
@@ -88,6 +166,9 @@ end_jobs_section() {
     echo "|        All Service Transfer Operations Completed         |"
     echo "------------------------------------------------------------"
     echo ""
+    
+    # Clean up temp directory
+    rm -rf "$TMP_LOG_DIR"
 }
 
 # Function for logging
@@ -119,8 +200,9 @@ log() {
     # Format log entry
     local log_entry="[$timestamp] $status_symbol [Action $action_padded] | $description_padded | Server: $server_padded | STATUS: $status_padded | Job $job_id"
     
-    # Write to log file
-    echo "$log_entry" >> "$ACTION_LOG"
+    # Write to the job's log file
+    local job_log_file="$TMP_LOG_DIR/job_${job_id}.log"
+    echo "$log_entry" >> "$job_log_file"
     
     # Also print to console
     echo "$log_entry"
@@ -377,22 +459,19 @@ execute_jobs() {
     pids=()
     vm_job_map=()
     
-    # Process each VM as a separate job
+    # Process each VM as a separate job - each in its own subshell to isolate logs
     job_id=1
     for vm in "${SELECTED_VMS[@]}"; do
         # Start job section in log
         start_job_section $job_id "$vm"
-        
-        # Map VM to its job ID
         vm_job_map+=("$vm:$job_id")
         
         # If we've reached the maximum number of parallel jobs, wait for one to finish
         while [ ${#pids[@]} -ge $MAX_PARALLEL_JOBS ]; do
             for i in "${!pids[@]}"; do
                 if ! kill -0 ${pids[$i]} 2>/dev/null; then
-                    # Process has completed, remove from tracking list
+                    wait ${pids[$i]}
                     unset pids[$i]
-                    # Re-index array
                     pids=("${pids[@]}")
                     break
                 fi
@@ -400,181 +479,274 @@ execute_jobs() {
             sleep 0.5
         done
         
-        # Execute the sequence in background
-        execute_sequence "$vm" sequence_array "$SELECTED_DC" "$job_id" "${SELECTED_SERVICES[@]}" &
+        # Launch a completely isolated job process with its own log file
+        (
+            # All log output for this job is already directed to its own file by the log() function
+            execute_sequence "$vm" sequence_array "$SELECTED_DC" "$job_id" "${SELECTED_SERVICES[@]}"
+            exit $?
+        ) &
         
         # Store PID for job control
         pids+=($!)
-        
-        # Increment job ID for next VM
         job_id=$((job_id + 1))
-        
-        # Brief pause to prevent overwhelming output
         sleep 0.5
     done
     
     # Wait for all remaining jobs to complete
     wait
     
-    # End the jobs section
-    end_jobs_section
+    # Combine all logs
+    combine_logs
 }
 
 # Main script execution starts here
 main_loop() {
+    # Check for command line arguments
+    if [ $# -gt 0 ]; then
+        parse_args "$@"
+    fi
+    
     while true; do
-        # Display available services
-        print_heading "SELECT SERVICES"
-        for i in "${!SERVICES[@]}"; do
-            echo -e "${CYAN}   $((i+1))${NC} │ ${GREEN}${SERVICES[$i]}${NC}"
-        done
-        echo -e "${CYAN}   $((${#SERVICES[@]}+1))${NC} │ ${PURPLE}all${NC}"
-        echo
-        
-        # Get service choices
-        while true; do
-            read -p "$(echo -e "${YELLOW}Select services${NC} (digits, e.g., 1,2 or 13): ")" service_choices
-            
-            # Check if "all" option is selected
-            if [[ "$service_choices" == "$((${#SERVICES[@]}+1))" ]]; then
-                # Select all services
-                SELECTED_SERVICES=("${SERVICES[@]}")
-                break
-            fi
-            
-            # Convert input string to array of individual digits
-            service_indices=()
-            for (( i=0; i<${#service_choices}; i++ )); do
-                service_indices+=(${service_choices:$i:1})
+        # Display available services if not provided via CLI
+        if [ -z "$CLI_SERVICES" ]; then
+            print_heading "SELECT SERVICES"
+            for i in "${!SERVICES[@]}"; do
+                echo -e "${CYAN}   $((i+1))${NC} │ ${GREEN}${SERVICES[$i]}${NC}"
             done
+            echo -e "${CYAN}   $((${#SERVICES[@]}+1))${NC} │ ${PURPLE}all${NC}"
+            echo
             
-            SELECTED_SERVICES=()
-            valid=true
-            
-            for index in "${service_indices[@]}"; do
-                if [[ "$index" =~ ^[0-9]$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "${#SERVICES[@]}" ]; then
-                    # Check if service is already selected (avoid duplicates)
-                    if [[ ! " ${SELECTED_SERVICES[*]} " =~ " ${SERVICES[$((index-1))]} " ]]; then
-                        SELECTED_SERVICES+=("${SERVICES[$((index-1))]}")
-                    fi
-                else
-                    echo -e "${RED}Invalid service number: $index${NC}"
-                    valid=false
+            # Get service choices
+            while true; do
+                read -p "$(echo -e "${YELLOW}Select services${NC} (comma-separated, e.g., 1,2 or 1,3,4): ")" service_choices
+                
+                # Remove spaces if any
+                service_choices=${service_choices// /}
+                
+                # Check if "all" option is selected
+                if [[ "$service_choices" == "$((${#SERVICES[@]}+1))" ]]; then
+                    # Select all services
+                    SELECTED_SERVICES=("${SERVICES[@]}")
                     break
+                fi
+                
+                # Check if input is comma-separated format
+                if [[ ! "$service_choices" =~ ^[0-9](,[0-9])*$ ]]; then
+                    echo -e "${RED}Error: Please enter comma-separated values (e.g., 1,2,3)${NC}"
+                    continue
+                fi
+                
+                # Parse comma-separated input
+                IFS=',' read -ra service_indices <<< "$service_choices"
+                
+                SELECTED_SERVICES=()
+                valid=true
+                
+                for index in "${service_indices[@]}"; do
+                    if [[ "$index" =~ ^[0-9]$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "${#SERVICES[@]}" ]; then
+                        # Check if service is already selected (avoid duplicates)
+                        if [[ ! " ${SELECTED_SERVICES[*]} " =~ " ${SERVICES[$((index-1))]} " ]]; then
+                            SELECTED_SERVICES+=("${SERVICES[$((index-1))]}")
+                        fi
+                    else
+                        echo -e "${RED}Invalid service number: $index${NC}"
+                        valid=false
+                        break
+                    fi
+                done
+                
+                if [ "$valid" = true ] && [ ${#SELECTED_SERVICES[@]} -gt 0 ]; then
+                    break
+                else
+                    echo -e "${RED}Please enter valid service numbers between 1 and ${#SERVICES[@]}, or ${#SERVICES[@]}+1 for all.${NC}"
                 fi
             done
             
-            if [ "$valid" = true ] && [ ${#SELECTED_SERVICES[@]} -gt 0 ]; then
-                break
+            echo -e "\n${WHITE}Selected services:${NC} ${GREEN}${SELECTED_SERVICES[*]}${NC}"
+        else
+            # Use services from command line arguments
+            SELECTED_SERVICES=()
+            IFS=',' read -ra service_list <<< "$CLI_SERVICES"
+            
+            for service in "${service_list[@]}"; do
+                # Check if service is valid
+                if [[ " ${SERVICES[*]} " =~ " ${service} " ]]; then
+                    SELECTED_SERVICES+=("$service")
+                else
+                    echo -e "${RED}Invalid service: $service${NC}"
+                    exit 1
+                fi
+            done
+            echo -e "${WHITE}Using services from command line:${NC} ${GREEN}${SELECTED_SERVICES[*]}${NC}"
+        fi
+        
+        # Display available datacenters if not provided via CLI
+        if [ -z "$CLI_DATACENTER" ]; then
+            print_heading "SELECT DESTINATION DATACENTER"
+            for i in "${!DATACENTERS[@]}"; do
+                echo -e "${CYAN}   $((i+1))${NC} │ ${GREEN}${DATACENTERS[$i]}${NC}"
+            done
+            echo
+            
+            # Get datacenter choice
+            while true; do
+                read -p "$(echo -e "${YELLOW}Select datacenter${NC} (1-${#DATACENTERS[@]}): ")" dc_choice
+                if [[ "$dc_choice" =~ ^[0-9]+$ ]] && [ "$dc_choice" -ge 1 ] && [ "$dc_choice" -le "${#DATACENTERS[@]}" ]; then
+                    SELECTED_DC="${DATACENTERS[$((dc_choice-1))]}"
+                    break
+                else
+                    echo -e "${RED}Invalid choice. Please enter a number between 1 and ${#DATACENTERS[@]}.${NC}"
+                fi
+            done
+            
+            echo -e "\n${WHITE}Selected datacenter:${NC} ${GREEN}$SELECTED_DC${NC}"
+        else
+            # Use datacenter from command line arguments
+            # Check if datacenter is valid
+            if [[ " ${DATACENTERS[*]} " =~ " ${CLI_DATACENTER} " ]]; then
+                SELECTED_DC="$CLI_DATACENTER"
+                echo -e "${WHITE}Using datacenter from command line:${NC} ${GREEN}$SELECTED_DC${NC}"
             else
-                echo -e "${RED}Please enter valid service numbers between 1 and ${#SERVICES[@]}, or ${#SERVICES[@]}+1 for all.${NC}"
+                echo -e "${RED}Invalid datacenter: $CLI_DATACENTER${NC}"
+                echo -e "${YELLOW}Available datacenters:${NC} ${GREEN}${DATACENTERS[*]}${NC}"
+                exit 1
             fi
-        done
-        
-        echo -e "\n${WHITE}Selected services:${NC} ${GREEN}${SELECTED_SERVICES[*]}${NC}"
-        
-        # Display available datacenters
-        print_heading "SELECT DESTINATION DATACENTER"
-        for i in "${!DATACENTERS[@]}"; do
-            echo -e "${CYAN}   $((i+1))${NC} │ ${GREEN}${DATACENTERS[$i]}${NC}"
-        done
-        echo
-        
-        # Get datacenter choice
-        while true; do
-            read -p "$(echo -e "${YELLOW}Select datacenter${NC} (1-${#DATACENTERS[@]}): ")" dc_choice
-            if [[ "$dc_choice" =~ ^[0-9]+$ ]] && [ "$dc_choice" -ge 1 ] && [ "$dc_choice" -le "${#DATACENTERS[@]}" ]; then
-                SELECTED_DC="${DATACENTERS[$((dc_choice-1))]}"
-                break
-            else
-                echo -e "${RED}Invalid choice. Please enter a number between 1 and ${#DATACENTERS[@]}.${NC}"
-            fi
-        done
-        
-        echo -e "\n${WHITE}Selected datacenter:${NC} ${GREEN}$SELECTED_DC${NC}"
+        fi
         
         # Get VMs for selected datacenter
         mapfile -t DC_VMS < <(awk -F'|' -v dc="$SELECTED_DC" '$1 == dc {print $2}' "$SERVERS_CONF")
         
-        # Display available VMs
-        print_heading "SELECT DESTINATION VMs"
-        for i in "${!DC_VMS[@]}"; do
-            echo -e "${CYAN}   $((i+1))${NC} │ ${GREEN}${DC_VMS[$i]}${NC}"
-        done
-        echo -e "${CYAN}   $((${#DC_VMS[@]}+1))${NC} │ ${PURPLE}all${NC}"
-        echo
-        
-        # Get VM choices
-        while true; do
-            read -p "$(echo -e "${YELLOW}Enter VM numbers${NC} (comma-separated or single number, e.g., 1,3,5): ")" vm_choices
+        # Display available VMs if not provided via CLI
+        if [ -z "$CLI_VMS" ]; then
+            print_heading "SELECT DESTINATION VMs"
+            for i in "${!DC_VMS[@]}"; do
+                echo -e "${CYAN}   $((i+1))${NC} │ ${GREEN}${DC_VMS[$i]}${NC}"
+            done
+            echo -e "${CYAN}   $((${#DC_VMS[@]}+1))${NC} │ ${PURPLE}all${NC}"
+            echo
             
-            # Check if "all" option is selected
-            if [[ "$vm_choices" == "$((${#DC_VMS[@]}+1))" ]]; then
-                # Select all VMs
-                SELECTED_VMS=("${DC_VMS[@]}")
-                break
-            fi
-            
-            # Parse comma-separated input
-            IFS=',' read -ra VM_INDICES <<< "$vm_choices"
-            SELECTED_VMS=()
-            
-            valid=true
-            for index in "${VM_INDICES[@]}"; do
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "${#DC_VMS[@]}" ]; then
-                    SELECTED_VMS+=("${DC_VMS[$((index-1))]}")
-                else
-                    echo -e "${RED}Invalid VM number: $index${NC}"
-                    valid=false
+            # Get VM choices
+            while true; do
+                read -p "$(echo -e "${YELLOW}Enter VM numbers${NC} (comma-separated or single number, e.g., 1,3,5): ")" vm_choices
+                
+                # Check if "all" option is selected
+                if [[ "$vm_choices" == "$((${#DC_VMS[@]}+1))" ]]; then
+                    # Select all VMs
+                    SELECTED_VMS=("${DC_VMS[@]}")
                     break
+                fi
+                
+                # Parse comma-separated input
+                IFS=',' read -ra VM_INDICES <<< "$vm_choices"
+                SELECTED_VMS=()
+                
+                valid=true
+                for index in "${VM_INDICES[@]}"; do
+                    if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "${#DC_VMS[@]}" ]; then
+                        SELECTED_VMS+=("${DC_VMS[$((index-1))]}")
+                    else
+                        echo -e "${RED}Invalid VM number: $index${NC}"
+                        valid=false
+                        break
+                    fi
+                done
+                
+                if [ "$valid" = true ] && [ ${#SELECTED_VMS[@]} -gt 0 ]; then
+                    break
+                else
+                    echo -e "${RED}Please enter valid VM numbers between 1 and ${#DC_VMS[@]}, or ${#DC_VMS[@]}+1 for all.${NC}"
                 fi
             done
             
-            if [ "$valid" = true ] && [ ${#SELECTED_VMS[@]} -gt 0 ]; then
-                break
+            echo -e "\n${WHITE}Selected VMs:${NC} ${GREEN}${SELECTED_VMS[*]}${NC}"
+        else
+            # Use VMs from command line arguments
+            SELECTED_VMS=()
+            IFS=',' read -ra vm_list <<< "$CLI_VMS"
+            
+            for vm in "${vm_list[@]}"; do
+                # Check if VM is valid for the selected datacenter
+                if [[ " ${DC_VMS[*]} " =~ " ${vm} " ]]; then
+                    SELECTED_VMS+=("$vm")
+                else
+                    echo -e "${RED}Invalid VM for datacenter $SELECTED_DC: $vm${NC}"
+                    echo -e "${YELLOW}Available VMs:${NC} ${GREEN}${DC_VMS[*]}${NC}"
+                    exit 1
+                fi
+            done
+            echo -e "${WHITE}Using VMs from command line:${NC} ${GREEN}${SELECTED_VMS[*]}${NC}"
+        fi
+        
+        # Get maximum parallel jobs if not provided via CLI
+        if [ -z "$CLI_PARALLEL" ]; then
+            read -p "$(echo -e "${YELLOW}Enter maximum parallel jobs${NC} (default: 3): ")" MAX_PARALLEL_JOBS
+            MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS:-3}
+            echo -e "${WHITE}Running with${NC} ${CYAN}$MAX_PARALLEL_JOBS${WHITE} parallel jobs${NC}"
+        else
+            # Use parallel jobs from command line arguments
+            if [[ "$CLI_PARALLEL" =~ ^[0-9]+$ ]] && [ "$CLI_PARALLEL" -ge 1 ]; then
+                MAX_PARALLEL_JOBS="$CLI_PARALLEL"
+                echo -e "${WHITE}Using parallel jobs from command line:${NC} ${CYAN}$MAX_PARALLEL_JOBS${NC}"
             else
-                echo -e "${RED}Please enter valid VM numbers between 1 and ${#DC_VMS[@]}, or ${#DC_VMS[@]}+1 for all.${NC}"
+                echo -e "${RED}Invalid number of parallel jobs: $CLI_PARALLEL${NC}"
+                exit 1
             fi
-        done
+        fi
         
-        echo -e "\n${WHITE}Selected VMs:${NC} ${GREEN}${SELECTED_VMS[*]}${NC}"
-        
-        # Get maximum parallel jobs
-        read -p "$(echo -e "${YELLOW}Enter maximum parallel jobs${NC} (default: 3): ")" MAX_PARALLEL_JOBS
-        MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS:-3}
-        echo -e "${WHITE}Running with${NC} ${CYAN}$MAX_PARALLEL_JOBS${WHITE} parallel jobs${NC}"
-        
-        # Display available actions
-        print_heading "AVAILABLE ACTIONS"
-        echo -e "${CYAN}   1${NC} │ ${GREEN}Deploy All Services${NC} - Runs deploy_all_<service>.sh"
-        echo -e "       ${WHITE}(Executes 111-ACTION-deploy-services.sh in all van-buren directories)${NC}"
-        echo -e "${CYAN}   2${NC} │ ${GREEN}Start All Services${NC} - Runs start_all_<service>.sh"
-        echo -e "       ${WHITE}(Executes 222-ACTION-start-services.sh in all van-buren directories)${NC}"
-        echo -e "${CYAN}   3${NC} │ ${GREEN}Stop All Services${NC} - Runs stop_all_<service>.sh"
-        echo -e "       ${WHITE}(Executes 000-ACTION-stop-services.sh in all van-buren directories)${NC}"
-        echo -e "${CYAN}   4${NC} │ ${GREEN}Purge All Services${NC} - Runs purge_all_<service>.sh"
-        echo -e "       ${WHITE}(Executes 999-ACTION-purge-services.sh in all van-buren directories)${NC}"
-        
-        # Get sequence of actions
-        while true; do
-            read -p "$(echo -e "${YELLOW}Enter sequence of actions${NC} (comma-separated, e.g., 1,2 or 3,1,2,4): ")" sequence_input
+        # Display available actions if not provided via CLI
+        if [ -z "$CLI_ACTIONS" ]; then
+            print_heading "AVAILABLE ACTIONS"
+            echo -e "${CYAN}   1${NC} │ ${GREEN}Deploy All Services${NC} - Runs deploy_all_<service>.sh"
+            echo -e "       ${WHITE}(Executes 111-ACTION-deploy-services.sh in all van-buren directories)${NC}"
+            echo -e "${CYAN}   2${NC} │ ${GREEN}Start All Services${NC} - Runs start_all_<service>.sh"
+            echo -e "       ${WHITE}(Executes 222-ACTION-start-services.sh in all van-buren directories)${NC}"
+            echo -e "${CYAN}   3${NC} │ ${GREEN}Stop All Services${NC} - Runs stop_all_<service>.sh"
+            echo -e "       ${WHITE}(Executes 000-ACTION-stop-services.sh in all van-buren directories)${NC}"
+            echo -e "${CYAN}   4${NC} │ ${GREEN}Purge All Services${NC} - Runs purge_all_<service>.sh"
+            echo -e "       ${WHITE}(Executes 999-ACTION-purge-services.sh in all van-buren directories)${NC}"
             
-            # Remove spaces if any
-            sequence_input=${sequence_input// /}
+            # Get sequence of actions
+            while true; do
+                read -p "$(echo -e "${YELLOW}Enter sequence of actions${NC} (comma-separated, e.g., 1,2 or 3,1,2,4): ")" sequence_input
+                
+                # Remove spaces if any
+                sequence_input=${sequence_input// /}
+                
+                # Check if input is comma-separated format or just a single digit
+                if [[ "$sequence_input" =~ ^[1-4](,[1-4])*$ ]]; then
+                    # Valid comma-separated sequence or single digit
+                    IFS=',' read -ra sequence_array <<< "$sequence_input"
+                    break
+                else
+                    echo -e "${RED}Error: Please enter comma-separated values using only numbers 1-4 (e.g., 1,2,3 or 2,4)${NC}"
+                    continue
+                fi
+            done
+        else
+            # Use actions from command line arguments
+            sequence_input="$CLI_ACTIONS"
             
-            # Check if input is comma-separated format or just a single digit
+            # Validate sequence format
             if [[ "$sequence_input" =~ ^[1-4](,[1-4])*$ ]]; then
-                # Valid comma-separated sequence or single digit
                 IFS=',' read -ra sequence_array <<< "$sequence_input"
-                break
+                echo -e "${WHITE}Using action sequence from command line:${NC} ${PURPLE}$sequence_input${NC}"
             else
-                echo -e "${RED}Error: Please enter comma-separated values using only numbers 1-4 (e.g., 1,2,3 or 2,4)${NC}"
-                continue
+                echo -e "${RED}Invalid action sequence: $sequence_input${NC}"
+                echo -e "${YELLOW}Sequence must be comma-separated values using only numbers 1-4 (e.g., 1,2,3)${NC}"
+                exit 1
             fi
-        done
+        fi
         
         # Show execution plan and get confirmation
-        if show_execution_plan; then
+        if [ "$CLI_SKIP_CONFIRM" = true ]; then
+            # Skip confirmation if -y flag was used
+            execute_jobs
+            
+            print_heading "EXECUTION SUMMARY"
+            echo -e "${GREEN}All jobs completed successfully!${NC}"
+            echo -e "${WHITE}Action log:${NC} ${CYAN}$ACTION_LOG${NC}"
+            break
+        elif show_execution_plan; then
             # User confirmed, execute the plan
             execute_jobs
             
@@ -585,10 +757,20 @@ main_loop() {
         else
             # User chose to restart
             echo -e "${YELLOW}Restarting selection process...${NC}"
+            # Reset CLI parameters to force interactive mode in the next loop
+            CLI_SERVICES=""
+            CLI_DATACENTER=""
+            CLI_VMS=""
+            CLI_PARALLEL=""
+            CLI_ACTIONS=""
             continue
         fi
     done
 }
 
-# Start the script execution
-main_loop
+# Parse command line arguments and start the script
+if [ $# -gt 0 ]; then
+    main_loop "$@"
+else
+    main_loop
+fi
