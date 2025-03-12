@@ -1,4 +1,0 @@
-DEST_USER=ubuntu
-DEST_IP=185.204.170.86
-DEST_PORT=22
-DEST_PATH=/home/ubuntu/
