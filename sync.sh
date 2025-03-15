@@ -234,10 +234,11 @@ case $TRANSFER_TYPE in
         print_summary_item "Source" "$SOURCE_DATACENTER - Server: $SOURCE_VM ($SOURCE_HOST)"
         print_summary_item "Destination" "$DEST_DATACENTER - Server: $DEST_VM ($DEST_HOST)"
         echo ""
-        read -p "$(echo -e "${YELLOW}Continue? (y/n):${NC} ")" CONFIRM
+        read -p "$(echo -e "${YELLOW}Continue? (Y/n):${NC} ")" CONFIRM
+        CONFIRM=${CONFIRM:-y}
         if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-            log "${YELLOW}Operation canceled by user${NC}"
-            exit 0
+            log "${YELLOW}Operation canceled by user, restarting...${NC}"
+            exec "$0"
         fi
 
         # Display VM-to-VM transfer options
@@ -486,117 +487,159 @@ EOF
     2) # Main machine to VM transfer
         print_header "MAIN MACHINE TO VM TRANSFER"
         
-        # Get unique datacenters
-        DATACENTERS=($(get_datacenters))
-
-        # Display datacenter options for destination
-        print_section "Available datacenters"
-        for i in "${!DATACENTERS[@]}"; do
-            print_menu_item "$((i+1))" "${DATACENTERS[$i]}"
-        done
+        # Display transfer options immediately
+        print_header "TRANSFER OPTIONS"
+        print_menu_item "1" "Transfer a specific file or folder from Main VM to destination VM"
+        print_menu_item "2" "Sync by patterns - Transfer specific files/folders from HOME based on patterns"
+        echo -e "   ${WHITE}(van-buren-* directories, .sh files, .secret/ folder)${NC}"
         echo ""
-
-        # Get destination datacenter
-        while true; do
-            read -p "$(echo -e "${YELLOW}Choose destination datacenter (1-${#DATACENTERS[@]}):${NC} ")" DST_DC_CHOICE
-            if [[ "$DST_DC_CHOICE" =~ ^[0-9]+$ ]] && [ "$DST_DC_CHOICE" -ge 1 ] && [ "$DST_DC_CHOICE" -le "${#DATACENTERS[@]}" ]; then
-                DEST_DATACENTER="${DATACENTERS[$((DST_DC_CHOICE-1))]}"
-                break
-            fi
-            echo -e "${RED}Invalid selection. Please try again.${NC}"
-        done
-
-        # Get VMs for destination datacenter
-        DEST_VMS=($(get_vms_for_datacenter "$DEST_DATACENTER"))
-
-        # Display VM options for destination
-        print_section "Available VMs in $DEST_DATACENTER datacenter"
-        for i in "${!DEST_VMS[@]}"; do
-            print_menu_item "$((i+1))" "${DEST_VMS[$i]}"
-        done
-        echo ""
-
-        # Get destination VM
-        while true; do
-            read -p "$(echo -e "${YELLOW}Choose destination VM (1-${#DEST_VMS[@]}):${NC} ")" DST_VM_CHOICE
-            if [[ "$DST_VM_CHOICE" =~ ^[0-9]+$ ]] && [ "$DST_VM_CHOICE" -ge 1 ] && [ "$DST_VM_CHOICE" -le "${#DEST_VMS[@]}" ]; then
-                DEST_VM="${DEST_VMS[$((DST_VM_CHOICE-1))]}"
-                break
-            fi
-            echo -e "${RED}Invalid selection. Please try again.${NC}"
-        done
-
-        # Set connection parameters for destination
-        DEST_USER=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "username")
-        DEST_HOST=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "host")
-        DEST_IP=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "ip")
-        DEST_PORT=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "port")
-        DEST_PATH="/home/$DEST_USER/"
-
-        # Display summary and confirm
-        print_header "CONFIGURATION SUMMARY"
-        print_summary_item "Source" "Main Machine ($(hostname))"
-        print_summary_item "Destination" "$DEST_DATACENTER - Server: $DEST_VM ($DEST_HOST)"
-        echo ""
-        read -p "$(echo -e "${YELLOW}Continue? (y/n):${NC} ")" CONFIRM
-        if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-            log "${YELLOW}Operation canceled by user${NC}"
-            exit 0
-        fi
-
-        # Build SSH connection string for destination
-        DEST_SSH="ssh -o ConnectTimeout=10 -p $DEST_PORT $DEST_USER@$DEST_IP"
-
-        # Check SSH connection to destination
-        if ! test_ssh "$DEST_SSH" "destination VM ($DEST_USER@$DEST_IP:$DEST_PORT)"; then
-            exit 1
-        fi
-
-        # Create directory on destination
-        log "Creating directory on destination..."
-        $DEST_SSH "mkdir -p $DEST_PATH"
-
-        # Get source path from main machine
-        print_section "File/Folder Selection"
-        read -p "$(echo -e "${YELLOW}Enter the path to the specific file or folder on main machine:${NC} ")" LOCAL_SOURCE_PATH
-        read -p "$(echo -e "${YELLOW}Enter the destination path on VM (default: $DEST_PATH):${NC} ")" CUSTOM_DEST_PATH
-        CUSTOM_DEST_PATH=${CUSTOM_DEST_PATH:-$DEST_PATH}
-
-        # Prepare rsync options
-        RSYNC_OPTS="-az --progress"
-
-        # Check if local source path is a file or directory
-        if [ -d "$LOCAL_SOURCE_PATH" ]; then
-            IS_LOCAL_DIR="yes"
-            LOCAL_SOURCE_PATH="${LOCAL_SOURCE_PATH%/}"
-            log "Transferring local directory: $LOCAL_SOURCE_PATH to destination directory: $CUSTOM_DEST_PATH"
-            
-            # Create directory on destination
-            $DEST_SSH "mkdir -p \"$CUSTOM_DEST_PATH\""
-            
-            # Transfer with rsync - include directory itself
-            DIR_NAME=$(basename "$LOCAL_SOURCE_PATH")
-            PARENT_PATH=$(dirname "$LOCAL_SOURCE_PATH")
-            
-            print_section "Starting File Transfer"
-            rsync $RSYNC_OPTS -r -e "ssh -p $DEST_PORT" "$PARENT_PATH/$DIR_NAME" "$DEST_USER@$DEST_IP:$CUSTOM_DEST_PATH" || handle_failure "copy from main machine to destination VM"
-        else
-            IS_LOCAL_DIR="no"
-            FILE_NAME=$(basename "$LOCAL_SOURCE_PATH")
-            DEST_FULL="$CUSTOM_DEST_PATH/$FILE_NAME"
-            log "Transferring local file: $LOCAL_SOURCE_PATH to destination path: $DEST_FULL"
-            
-            # Create directory on destination
-            $DEST_SSH "mkdir -p \"$CUSTOM_DEST_PATH\""
-            
-            # Transfer with rsync
-            print_section "Starting File Transfer"
-            rsync $RSYNC_OPTS -e "ssh -p $DEST_PORT" "$LOCAL_SOURCE_PATH" "$DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "copy from main machine to destination VM"
-        fi
+        read -p "$(echo -e "${YELLOW}Choose an option (1-2) [1]:${NC} ")" MAIN2VM_OPTION
+        MAIN2VM_OPTION=${MAIN2VM_OPTION:-1}
         
-        log "${GREEN}Transfer from main machine to VM completed successfully!${NC}"
+        case $MAIN2VM_OPTION in
+            1) # Transfer specific file/folder
+                # Get unique datacenters
+                DATACENTERS=($(get_datacenters))
+
+                # Display datacenter options for destination
+                print_section "Available datacenters"
+                for i in "${!DATACENTERS[@]}"; do
+                    print_menu_item "$((i+1))" "${DATACENTERS[$i]}"
+                done
+                echo ""
+
+                # Get destination datacenter
+                while true; do
+                    read -p "$(echo -e "${YELLOW}Choose destination datacenter (1-${#DATACENTERS[@]}):${NC} ")" DST_DC_CHOICE
+                    if [[ "$DST_DC_CHOICE" =~ ^[0-9]+$ ]] && [ "$DST_DC_CHOICE" -ge 1 ] && [ "$DST_DC_CHOICE" -le "${#DATACENTERS[@]}" ]; then
+                        DEST_DATACENTER="${DATACENTERS[$((DST_DC_CHOICE-1))]}"
+                        break
+                    fi
+                    echo -e "${RED}Invalid selection. Please try again.${NC}"
+                done
+
+                # Get VMs for destination datacenter
+                DEST_VMS=($(get_vms_for_datacenter "$DEST_DATACENTER"))
+
+                # Display VM options for destination
+                print_section "Available VMs in $DEST_DATACENTER datacenter"
+                for i in "${!DEST_VMS[@]}"; do
+                    print_menu_item "$((i+1))" "${DEST_VMS[$i]}"
+                done
+                echo ""
+
+                # Get destination VM
+                while true; do
+                    read -p "$(echo -e "${YELLOW}Choose destination VM (1-${#DEST_VMS[@]}):${NC} ")" DST_VM_CHOICE
+                    if [[ "$DST_VM_CHOICE" =~ ^[0-9]+$ ]] && [ "$DST_VM_CHOICE" -ge 1 ] && [ "$DST_VM_CHOICE" -le "${#DEST_VMS[@]}" ]; then
+                        DEST_VM="${DEST_VMS[$((DST_VM_CHOICE-1))]}"
+                        break
+                    fi
+                    echo -e "${RED}Invalid selection. Please try again.${NC}"
+                done
+
+                # Set connection parameters for destination
+                DEST_USER=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "username")
+                DEST_HOST=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "host")
+                DEST_IP=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "ip")
+                DEST_PORT=$(get_server_info "$DEST_DATACENTER" "$DEST_VM" "port")
+                DEST_PATH="/home/$DEST_USER/"
+
+                # Display summary and confirm
+                print_header "CONFIGURATION SUMMARY"
+                print_summary_item "Source" "Main Machine ($(hostname))"
+                print_summary_item "Destination" "$DEST_DATACENTER - Server: $DEST_VM ($DEST_HOST)"
+                echo ""
+                read -p "$(echo -e "${YELLOW}Continue? (Y/n):${NC} ")" CONFIRM
+                CONFIRM=${CONFIRM:-y}
+                if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+                    log "${YELLOW}Operation canceled by user, restarting...${NC}"
+                    exec "$0"
+                fi
+
+                # Build SSH connection string for destination
+                DEST_SSH="ssh -o ConnectTimeout=10 -p $DEST_PORT $DEST_USER@$DEST_IP"
+
+                # Check SSH connection to destination
+                if ! test_ssh "$DEST_SSH" "destination VM ($DEST_USER@$DEST_IP:$DEST_PORT)"; then
+                    exit 1
+                fi
+
+                # Create directory on destination
+                log "Creating directory on destination..."
+                $DEST_SSH "mkdir -p $DEST_PATH"
+                
+                # Get source path from main machine
+                print_section "File/Folder Selection"
+                read -p "$(echo -e "${YELLOW}Enter the path to the specific file or folder on main machine:${NC} ")" LOCAL_SOURCE_PATH
+                read -p "$(echo -e "${YELLOW}Enter the destination path on VM (default: $DEST_PATH):${NC} ")" CUSTOM_DEST_PATH
+                CUSTOM_DEST_PATH=${CUSTOM_DEST_PATH:-$DEST_PATH}
+
+                # Prepare rsync options
+                RSYNC_OPTS="-az --progress"
+
+                # Check if local source path is a file or directory
+                if [ -d "$LOCAL_SOURCE_PATH" ]; then
+                    IS_LOCAL_DIR="yes"
+                    LOCAL_SOURCE_PATH="${LOCAL_SOURCE_PATH%/}"
+                    log "Transferring local directory: $LOCAL_SOURCE_PATH to destination directory: $CUSTOM_DEST_PATH"
+                    
+                    # Create directory on destination
+                    $DEST_SSH "mkdir -p \"$CUSTOM_DEST_PATH\""
+                    
+                    # Transfer with rsync - include directory itself
+                    DIR_NAME=$(basename "$LOCAL_SOURCE_PATH")
+                    PARENT_PATH=$(dirname "$LOCAL_SOURCE_PATH")
+                    
+                    print_section "Starting File Transfer"
+                    rsync $RSYNC_OPTS -r -e "ssh -p $DEST_PORT" "$PARENT_PATH/$DIR_NAME" "$DEST_USER@$DEST_IP:$CUSTOM_DEST_PATH" || handle_failure "copy from main machine to destination VM"
+                else
+                    IS_LOCAL_DIR="no"
+                    FILE_NAME=$(basename "$LOCAL_SOURCE_PATH")
+                    DEST_FULL="$CUSTOM_DEST_PATH/$FILE_NAME"
+                    log "Transferring local file: $LOCAL_SOURCE_PATH to destination path: $DEST_FULL"
+                    
+                    # Create directory on destination
+                    $DEST_SSH "mkdir -p \"$CUSTOM_DEST_PATH\""
+                    
+                    # Transfer with rsync
+                    print_section "Starting File Transfer"
+                    rsync $RSYNC_OPTS -e "ssh -p $DEST_PORT" "$LOCAL_SOURCE_PATH" "$DEST_USER@$DEST_IP:$DEST_FULL" || handle_failure "copy from main machine to destination VM"
+                fi
+                
+                log "${GREEN}Transfer from main machine to VM completed successfully!${NC}"
+                ;;
+                
+            2) # Pattern-based transfer using external script
+                print_section "Pattern-based Sync"
+                log "${CYAN}Executing pattern-based sync using simple_synce-main2vm.sh...${NC}"
+                
+                # Get the script directory
+                SCRIPT_PATH="$(dirname "$0")/simple_synce-main2vm.sh"
+                
+                if [ ! -f "$SCRIPT_PATH" ]; then
+                    log "${RED}ERROR: Script $SCRIPT_PATH not found${NC}"
+                    exit 1
+                fi
+                
+                # Execute the external script
+                log "Running: $SCRIPT_PATH"
+                bash "$SCRIPT_PATH"
+                
+                if [ $? -eq 0 ]; then
+                    log "${GREEN}Pattern-based sync completed successfully!${NC}"
+                else
+                    log "${RED}Pattern-based sync failed!${NC}"
+                    exit 1
+                fi
+                ;;
+                
+            *)
+                log "${RED}ERROR: Invalid option selected${NC}"
+                exit 1
+                ;;
+        esac
         ;;
-        
     3) # VM to Main machine transfer
         print_header "VM TO MAIN MACHINE TRANSFER"
         
@@ -652,10 +695,11 @@ EOF
         print_summary_item "Source" "$SOURCE_DATACENTER - Server: $SOURCE_VM ($SOURCE_HOST)"
         print_summary_item "Destination" "Main Machine ($(hostname))"
         echo ""
-        read -p "$(echo -e "${YELLOW}Continue? (y/n):${NC} ")" CONFIRM
+        read -p "$(echo -e "${YELLOW}Continue? (Y/n):${NC} ")" CONFIRM
+        CONFIRM=${CONFIRM:-y}
         if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-            log "${YELLOW}Operation canceled by user${NC}"
-            exit 0
+            log "${YELLOW}Operation canceled by user, restarting...${NC}"
+            exec "$0"
         fi
 
         # Build SSH connection string for source
