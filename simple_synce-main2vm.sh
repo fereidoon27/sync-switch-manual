@@ -304,9 +304,9 @@ echo ""
 echo -e "${DIM}${SEPARATOR}${RESET}"
 echo ""
 
-echo -ne "${SECONDARY}Continue? (y/n): ${RESET}"
+echo -ne "${SECONDARY}Continue? (Y/n): ${RESET}"
 read CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+if [[ ! "$CONFIRM" =~ ^([Yy]?)$ ]]; then
     print_status "warning" "Operation canceled by user"
     log "Operation canceled by user"
     rm -f "$PATTERN_FILE"
@@ -325,7 +325,7 @@ for DEST_VM in "${SELECTED_VMS[@]}"; do
 
     # Extract VM number for source directory
     VM_NUMBER=$(echo "$DEST_VM" | sed -E 's/^cr([0-9]+).*/\1/')
-    SOURCE_PATH="/home/amin/1111-binance-services/cr$VM_NUMBER"
+    SOURCE_PATH="$HOME/1111-binance-services/cr$VM_NUMBER"
     DEST_PATH="/home/$DEST_USER"
 
     print_status "info" "Source: ${ITALIC}$SOURCE_PATH${RESET}"

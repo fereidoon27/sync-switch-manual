@@ -145,8 +145,8 @@ echo -e "\nConfiguration Summary:"
 echo "Source Datacenter: $SOURCE_DATACENTER"
 echo "Destination: Main Machine ($(hostname))"
 echo "Number of selected VMs: ${#SELECTED_VMS[@]}"
-read -p "Continue? (y/n): " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+read -p "Continue? (Y/n): " CONFIRM
+if [[ ! "$CONFIRM" =~ ^([Yy]?)$ ]]; then
     log "Operation canceled by user"
     rm -f "$PATTERN_FILE"
     exit 0

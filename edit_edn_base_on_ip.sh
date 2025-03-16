@@ -187,12 +187,12 @@ for idx in "${selected_indices[@]}"; do
         echo -e "   ${CYAN}Network:${RESET} ${YELLOW}Internal (172.20.*)${RESET} - Setting proxy to ${GREEN}true${RESET}"
         SHOULD_USE_PROXY=true
         ENV_FILE="envs"
-        LOCAL_ENV_PATH="/home/amin/ansible/env/envs"
+        LOCAL_ENV_PATH="$HOME/ansible/env/envs"
     else
         echo -e "   ${CYAN}Network:${RESET} ${YELLOW}External${RESET} - Setting proxy to ${RED}false${RESET}"
         SHOULD_USE_PROXY=false
         ENV_FILE="envs"
-        LOCAL_ENV_PATH="/home/amin/ansible/env/newpin/envs"
+        LOCAL_ENV_PATH="$HOME/ansible/env/newpin/envs"
     fi
 
     # Copy the appropriate environment file and rename it on the remote server using rsync.
