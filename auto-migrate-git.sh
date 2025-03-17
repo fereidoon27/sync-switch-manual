@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define project directory
-REPO_DIR="$HOME/git_repos/Synchronize_Switch-manual"
+REPO_DIR="$HOME/git_repos/sync-switch-manual"
 
 # Navigate to the project directory
 cd "$REPO_DIR" || { echo "Directory not found!"; exit 1; }
